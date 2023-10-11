@@ -7,7 +7,9 @@
 *.dll
 *.so
 *.dylib
-
+.env
+Pulumi.demo.yaml
+Pulumi.dev.yaml
 # Test binary, built with `go test -c`
 *.test
 
