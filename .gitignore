@@ -21,3 +21,4 @@ Pulumi.dev.yaml
 
 # Go workspace file
 go.work
+.idea

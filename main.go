@@ -3,32 +3,46 @@ package main
 import (
 	"errors"
 	"fmt"
-
 	"github.com/pulumi/pulumi-aws/sdk/v6/go/aws"
 	"github.com/pulumi/pulumi-aws/sdk/v6/go/aws/ec2"
 	"github.com/pulumi/pulumi/sdk/v3/go/pulumi"
 	"github.com/pulumi/pulumi/sdk/v3/go/pulumi/config"
 )
 
+type EC2Instance struct {
+	InstanceName          string `json:"instance_name,omitempty"`
+	InstanceType          string `json:"instance_type,omitempty"`
+	VolumeSize            int    `json:"volume_size,omitempty"`
+	VolumeType            string `json:"volume_type,omitempty"`
+	DeleteOnTermination   bool   `json:"delete_on_termination,omitempty"`
+	DisableApiTermination bool   `json:"disable_api_termination,omitempty"`
+}
 type Data struct {
-	Vpc                                       string   `json:"vpc,omitempty"`
-	VpcCidar                                  string   `json:"vpc_cidar,omitempty"`
-	VpcInstanceTenancy                        string   `json:"vpc_instance_tenancy"`
-	InternetGateway                           string   `json:"internet_gateway,omitempty"`
-	InternetGatewayAttachment                 string   `json:"internet_gateway_attachment,omitempty"`
-	PublicRoute                               string   `json:"public_route,omitempty"`
-	PublicRouteTable                          string   `json:"public_route_table,omitempty"`
-	PrivateRouteTable                         string   `json:"private_route_table,omitempty"`
-	PublicDestinationCidar                    string   `json:"public_destination_cidar,omitempty"`
-	PublicSubnets                             []string `json:"public_subnets,omitempty"`
-	PrivateSubnets                            []string `json:"private_subnets,omitempty"`
-	BitsToMask                                int      `json:"bits_to_mask,omitempty"`
-	MaxAvailabilityZones                      int      `json:"max_availability_zones,omitempty"`
-	AvailabilityZones                         []string `json:"availability_zones,omitempty"`
-	PublicSubnetsPrefix                       string   `json:"public_subnets_prefix,omitempty"`
-	PrivateSubnetPrefix                       string   `json:"private_subnets_prefix,omitempty"`
-	PublicRouteTableSubnetsAssociationPrefix  string   `json:"public_route_table_subnets_association_prefix,omitempty"`
-	PrivateRouteTableSubnetsAssociationPrefix string   `json:"private_route_table_subnets_association_prefix,omitempty"`
+	Vpc                                       string            `json:"vpc,omitempty"`
+	VpcCidar                                  string            `json:"vpc_cidar,omitempty"`
+	VpcInstanceTenancy                        string            `json:"vpc_instance_tenancy"`
+	InternetGateway                           string            `json:"internet_gateway,omitempty"`
+	InternetGatewayAttachment                 string            `json:"internet_gateway_attachment,omitempty"`
+	PublicRoute                               string            `json:"public_route,omitempty"`
+	PublicRouteTable                          string            `json:"public_route_table,omitempty"`
+	PrivateRouteTable                         string            `json:"private_route_table,omitempty"`
+	PublicDestinationCidar                    string            `json:"public_destination_cidar,omitempty"`
+	PublicSubnets                             []string          `json:"public_subnets,omitempty"`
+	PrivateSubnets                            []string          `json:"private_subnets,omitempty"`
+	BitsToMask                                int               `json:"bits_to_mask,omitempty"`
+	MaxAvailabilityZones                      int               `json:"max_availability_zones,omitempty"`
+	AvailabilityZones                         []string          `json:"availability_zones,omitempty"`
+	PublicSubnetsPrefix                       string            `json:"public_subnets_prefix,omitempty"`
+	PrivateSubnetPrefix                       string            `json:"private_subnets_prefix,omitempty"`
+	SecurityGroup                             string            `json:"security_group,omitempty"`
+	SecurityRuleType                          string            `json:"security_rule_type,omitempty"`
+	SecurityRuleProtocol                      string            `json:"security_rule_protocol,omitempty"`
+	SecurityRuleNames                         map[string]string `json:"security_rule_names,omitempty"`
+	InboundPorts                              map[string]int    `json:"all_inbound_ports,omitempty"`
+	FetchPublicIPURL                          string            `json:"url_to_fetch_public_ip,omitempty"`
+	EC2InstanceMetadata                       EC2Instance       `json:"ec2_instance_metadata,omitempty"`
+	PublicRouteTableSubnetsAssociationPrefix  string            `json:"public_route_table_subnets_association_prefix,omitempty"`
+	PrivateRouteTableSubnetsAssociationPrefix string            `json:"private_route_table_subnets_association_prefix,omitempty"`
 }
 
 func main() {
@@ -200,6 +214,97 @@ func main() {
 			privateRouteTables = append(privateRouteTables, privateRouteTable)
 		}
 
+		// Create a new security group
+		securityGroup, err := ec2.NewSecurityGroup(ctx, configData.SecurityGroup, &ec2.SecurityGroupArgs{
+			VpcId: awsVpc.ID(),
+			Tags: pulumi.StringMap{
+				"Name": pulumi.String(configData.SecurityGroup),
+			},
+			Ingress: ec2.SecurityGroupIngressArray{
+				&ec2.SecurityGroupIngressArgs{
+
+					Description: pulumi.String("Allow inbound HTTP traffic on port 80 from all public IP addresses"),
+					FromPort:    pulumi.Int(configData.InboundPorts["http"]),
+					ToPort:      pulumi.Int(configData.InboundPorts["http"]),
+					Protocol:    pulumi.String(configData.SecurityRuleProtocol),
+					CidrBlocks:  pulumi.StringArray{pulumi.String(configData.PublicDestinationCidar)},
+				},
+				&ec2.SecurityGroupIngressArgs{
+					Description: pulumi.String("Allow inbound HTTPS traffic on port 443 from all public IP addresses"),
+					FromPort:    pulumi.Int(configData.InboundPorts["https"]),
+					ToPort:      pulumi.Int(configData.InboundPorts["https"]),
+					Protocol:    pulumi.String(configData.SecurityRuleProtocol),
+					CidrBlocks:  pulumi.StringArray{pulumi.String(configData.PublicDestinationCidar)},
+				},
+				&ec2.SecurityGroupIngressArgs{
+					Description: pulumi.String("Allow inbound HTTPS traffic on port 8080 from public all public IP addresses"),
+					FromPort:    pulumi.Int(configData.InboundPorts["customPort"]),
+					ToPort:      pulumi.Int(configData.InboundPorts["customPort"]),
+					Protocol:    pulumi.String(configData.SecurityRuleProtocol),
+					CidrBlocks:  pulumi.StringArray{pulumi.String(configData.PublicDestinationCidar)},
+				},
+				//&ec2.SecurityGroupIngressArgs{
+				//	Description:     pulumi.String("Allow inbound SSH traffic on port 22 from custom IP"),
+				//	FromPort:        pulumi.Int(configData.InboundPorts["ssh"]),
+				//	ToPort:          pulumi.Int(configData.InboundPorts["ssh"]),
+				//	Protocol:        pulumi.String(configData.SecurityRuleProtocol),
+				//	CidrBlocks:      pulumi.StringArray{pulumi.String(systemPublicIP)},
+				//},
+			},
+		})
+		if err != nil {
+			return err
+		}
+
+		// Fetch the public IP address of the system and allow only that IP to connect through SSH
+		//resp, err := http.Get(configData.FetchPublicIPURL)
+		//if err != nil {
+		//	return err
+		//}
+		//defer func(Body io.ReadCloser) {
+		//	err = Body.Close()
+		//	if err != nil {
+		//
+		//	}
+		//}(resp.Body)
+		//
+		//if resp.StatusCode != http.StatusOK {
+		//	return errors.New("couldn't fetch public IP address")
+		//}
+		//
+		//// Read the response body
+		//body, err := io.ReadAll(resp.Body)
+		//if err != nil {
+		//	return err
+		//}
+
+		//fmt.Println("resp: ", string(body))
+		//systemPublicIP := string(body) + "/32"
+
+		// Create an EC2 instance
+		/*
+			_, err = ec2.NewInstance(ctx, configData.EC2InstanceMetadata.InstanceName, &ec2.InstanceArgs{
+				InstanceType: pulumi.String(configData.EC2InstanceMetadata.InstanceType),
+				Ami:          pulumi.String("<your-ami-id>"),
+				SubnetId:     awsVpc.ID(),
+				VpcSecurityGroupIds: pulumi.StringArray{securityGroup.ID()},
+				RootBlockDevice: &ec2.InstanceRootBlockDeviceArgs{
+					VolumeSize:          pulumi.Int(configData.EC2InstanceMetadata.VolumeSize),           // Set root volume size to 25 GB
+					VolumeType:          pulumi.String(configData.EC2InstanceMetadata.VolumeType),        // Use General Purpose SSD (GP2)
+					DeleteOnTermination: pulumi.Bool(configData.EC2InstanceMetadata.DeleteOnTermination), // Root volume is deleted when instance is terminated
+				},
+				DisableApiTermination: pulumi.Bool(configData.EC2InstanceMetadata.DisableApiTermination), // Protect against accidental termination is set to "No"
+				Tags: pulumi.StringMap{
+					"Name": pulumi.String(configData.EC2InstanceMetadata.InstanceName),
+				},
+			})
+			if err != nil {
+				return err
+			}
+		*/
+
+		ctx.Export("securityGroupId", securityGroup.ID())
+
 		// Export the subnet and route table IDs for later use
 		//ctx.Export("publicSubnetIDs", pulumi.ToStringArray(publicSubnets))
 		//ctx.Export("privateSubnetIDs", pulumi.ToStringArray(privateSubnets))
@@ -208,3 +313,25 @@ func main() {
 		return nil
 	})
 }
+
+//func extractPublicIP(body []byte) string {
+//	// You need to parse the JSON response to extract the public IP address.
+//	// The structure of the response from httpbin.org is like this:
+//	// {"origin": "xxx.xxx.xxx.xxx"}
+//	// You can use a JSON parser or a simple string manipulation to extract the IP.
+//
+//	// For this example, we'll use a simple string manipulation to extract the IP.
+//	response := string(body)
+//	start := "\"origin\": \""
+//	end := "\"}"
+//	startIndex := strings.Index(response, start)
+//	if startIndex == -1 {
+//		return ""
+//	}
+//	startIndex += len(start)
+//	endIndex := strings.Index(response[startIndex:], end)
+//	if endIndex == -1 {
+//		return ""
+//	}
+//	return response[startIndex : startIndex+endIndex]
+//}
