@@ -3,6 +3,8 @@ package main
 import (
 	"errors"
 	"fmt"
+	"os"
+
 	"github.com/pulumi/pulumi-aws/sdk/v6/go/aws"
 	"github.com/pulumi/pulumi-aws/sdk/v6/go/aws/ec2"
 	"github.com/pulumi/pulumi/sdk/v3/go/pulumi"
@@ -17,6 +19,7 @@ type EC2Instance struct {
 	DeleteOnTermination   bool   `json:"delete_on_termination,omitempty"`
 	DisableApiTermination bool   `json:"disable_api_termination,omitempty"`
 }
+
 type Data struct {
 	Vpc                                       string            `json:"vpc,omitempty"`
 	VpcCidar                                  string            `json:"vpc_cidar,omitempty"`
@@ -41,6 +44,9 @@ type Data struct {
 	InboundPorts                              map[string]int    `json:"all_inbound_ports,omitempty"`
 	FetchPublicIPURL                          string            `json:"url_to_fetch_public_ip,omitempty"`
 	EC2InstanceMetadata                       EC2Instance       `json:"ec2_instance_metadata,omitempty"`
+	AmiID                                     string            `json:"ami_id,omitempty"`
+	SSHKeyName                                string            `json:"ssh_key_name,omitempty"`
+	PublicKeyFilePath                         string            `json:"public_key_file_path,omitempty"`
 	PublicRouteTableSubnetsAssociationPrefix  string            `json:"public_route_table_subnets_association_prefix,omitempty"`
 	PrivateRouteTableSubnetsAssociationPrefix string            `json:"private_route_table_subnets_association_prefix,omitempty"`
 }
@@ -167,6 +173,17 @@ func main() {
 			return err
 		}
 
+		// Create a private route table to an existing vpc
+		privateRouteTable, err := ec2.NewRouteTable(ctx, configData.PrivateRouteTable, &ec2.RouteTableArgs{
+			VpcId: awsVpc.ID(),
+			Tags: pulumi.StringMap{
+				"Name": pulumi.String(configData.PrivateRouteTable),
+			},
+		})
+		if err != nil {
+			return err
+		}
+
 		// Create a route for the public route table to an Internet Gateway (for public subnets)
 		_, err = ec2.NewRoute(ctx, configData.PublicRoute, &ec2.RouteArgs{
 			RouteTableId:         publicRouteTable.ID(),
@@ -189,19 +206,7 @@ func main() {
 		}
 
 		// Create separate route tables for private subnets
-		var privateRouteTables []*ec2.RouteTable
 		for i, privateSubnetID := range privateSubnets {
-			routeTableName := fmt.Sprintf(configData.PrivateRouteTable+"-%d", i)
-			privateRouteTable, err := ec2.NewRouteTable(ctx, routeTableName, &ec2.RouteTableArgs{
-				VpcId: awsVpc.ID(),
-				Tags: pulumi.StringMap{
-					"Name": pulumi.String(routeTableName),
-				},
-			})
-			if err != nil {
-				return err
-			}
-
 			// Associate each private route table with its respective private subnet
 			_, err = ec2.NewRouteTableAssociation(ctx, fmt.Sprintf(configData.PrivateRouteTableSubnetsAssociationPrefix+"-%d", i), &ec2.RouteTableAssociationArgs{
 				SubnetId:     privateSubnetID,
@@ -210,9 +215,15 @@ func main() {
 			if err != nil {
 				return err
 			}
-
-			privateRouteTables = append(privateRouteTables, privateRouteTable)
 		}
+
+		// Fetch the public IP address of the system and allow only that IP to connect through SSH
+		systemPublicIP, err := getPublicIPV4(configData.FetchPublicIPURL)
+		if err != nil {
+			return err
+		}
+
+		systemPublicIP = systemPublicIP + "/32"
 
 		// Create a new security group
 		securityGroup, err := ec2.NewSecurityGroup(ctx, configData.SecurityGroup, &ec2.SecurityGroupArgs{
@@ -222,7 +233,6 @@ func main() {
 			},
 			Ingress: ec2.SecurityGroupIngressArray{
 				&ec2.SecurityGroupIngressArgs{
-
 					Description: pulumi.String("Allow inbound HTTP traffic on port 80 from all public IP addresses"),
 					FromPort:    pulumi.Int(configData.InboundPorts["http"]),
 					ToPort:      pulumi.Int(configData.InboundPorts["http"]),
@@ -243,69 +253,58 @@ func main() {
 					Protocol:    pulumi.String(configData.SecurityRuleProtocol),
 					CidrBlocks:  pulumi.StringArray{pulumi.String(configData.PublicDestinationCidar)},
 				},
-				//&ec2.SecurityGroupIngressArgs{
-				//	Description:     pulumi.String("Allow inbound SSH traffic on port 22 from custom IP"),
-				//	FromPort:        pulumi.Int(configData.InboundPorts["ssh"]),
-				//	ToPort:          pulumi.Int(configData.InboundPorts["ssh"]),
-				//	Protocol:        pulumi.String(configData.SecurityRuleProtocol),
-				//	CidrBlocks:      pulumi.StringArray{pulumi.String(systemPublicIP)},
-				//},
+				&ec2.SecurityGroupIngressArgs{
+					Description: pulumi.String("Allow inbound SSH traffic on port 22 from custom IP"),
+					FromPort:    pulumi.Int(configData.InboundPorts["ssh"]),
+					ToPort:      pulumi.Int(configData.InboundPorts["ssh"]),
+					Protocol:    pulumi.String(configData.SecurityRuleProtocol),
+					CidrBlocks:  pulumi.StringArray{pulumi.String(systemPublicIP)},
+				},
 			},
 		})
 		if err != nil {
 			return err
 		}
 
-		// Fetch the public IP address of the system and allow only that IP to connect through SSH
-		//resp, err := http.Get(configData.FetchPublicIPURL)
-		//if err != nil {
-		//	return err
-		//}
-		//defer func(Body io.ReadCloser) {
-		//	err = Body.Close()
-		//	if err != nil {
-		//
-		//	}
-		//}(resp.Body)
-		//
-		//if resp.StatusCode != http.StatusOK {
-		//	return errors.New("couldn't fetch public IP address")
-		//}
-		//
-		//// Read the response body
-		//body, err := io.ReadAll(resp.Body)
-		//if err != nil {
-		//	return err
-		//}
+		// Read the public key content from the file.
+		publicKeyContent, err := os.ReadFile(configData.PublicKeyFilePath)
+		if err != nil {
+			return err
+		}
 
-		//fmt.Println("resp: ", string(body))
-		//systemPublicIP := string(body) + "/32"
+		// Create an EC2 key pair.
+		_, err = ec2.NewKeyPair(ctx, configData.SSHKeyName, &ec2.KeyPairArgs{
+			KeyName:   pulumi.String(configData.SSHKeyName),
+			PublicKey: pulumi.String(publicKeyContent),
+		})
+		if err != nil {
+			return err
+		}
 
 		// Create an EC2 instance
-		/*
-			_, err = ec2.NewInstance(ctx, configData.EC2InstanceMetadata.InstanceName, &ec2.InstanceArgs{
-				InstanceType: pulumi.String(configData.EC2InstanceMetadata.InstanceType),
-				Ami:          pulumi.String("<your-ami-id>"),
-				SubnetId:     awsVpc.ID(),
-				VpcSecurityGroupIds: pulumi.StringArray{securityGroup.ID()},
-				RootBlockDevice: &ec2.InstanceRootBlockDeviceArgs{
-					VolumeSize:          pulumi.Int(configData.EC2InstanceMetadata.VolumeSize),           // Set root volume size to 25 GB
-					VolumeType:          pulumi.String(configData.EC2InstanceMetadata.VolumeType),        // Use General Purpose SSD (GP2)
-					DeleteOnTermination: pulumi.Bool(configData.EC2InstanceMetadata.DeleteOnTermination), // Root volume is deleted when instance is terminated
-				},
-				DisableApiTermination: pulumi.Bool(configData.EC2InstanceMetadata.DisableApiTermination), // Protect against accidental termination is set to "No"
-				Tags: pulumi.StringMap{
-					"Name": pulumi.String(configData.EC2InstanceMetadata.InstanceName),
-				},
-			})
-			if err != nil {
-				return err
-			}
-		*/
-
-		ctx.Export("securityGroupId", securityGroup.ID())
+		_, err = ec2.NewInstance(ctx, configData.EC2InstanceMetadata.InstanceName, &ec2.InstanceArgs{
+			InstanceType:             pulumi.String(configData.EC2InstanceMetadata.InstanceType),
+			AssociatePublicIpAddress: pulumi.Bool(true),
+			KeyName:                  pulumi.String(configData.SSHKeyName),
+			Ami:                      pulumi.String(configData.AmiID),
+			SubnetId:                 publicSubnets[0],
+			VpcSecurityGroupIds:      pulumi.StringArray{securityGroup.ID()},
+			RootBlockDevice: &ec2.InstanceRootBlockDeviceArgs{
+				VolumeSize:          pulumi.Int(configData.EC2InstanceMetadata.VolumeSize),           // Set root volume size to 25 GB
+				VolumeType:          pulumi.String(configData.EC2InstanceMetadata.VolumeType),        // Use General Purpose SSD (GP2)
+				DeleteOnTermination: pulumi.Bool(configData.EC2InstanceMetadata.DeleteOnTermination), // Root volume is deleted when instance is terminated
+			},
+			DisableApiTermination: pulumi.Bool(configData.EC2InstanceMetadata.DisableApiTermination), // Protect against accidental termination is set to "No"
+			Tags: pulumi.StringMap{
+				"Name": pulumi.String(configData.EC2InstanceMetadata.InstanceName),
+			},
+		})
+		if err != nil {
+			return err
+		}
 
 		// Export the subnet and route table IDs for later use
+		//ctx.Export("securityGroupId", securityGroup.ID())
 		//ctx.Export("publicSubnetIDs", pulumi.ToStringArray(publicSubnets))
 		//ctx.Export("privateSubnetIDs", pulumi.ToStringArray(privateSubnets))
 		//ctx.Export("privateRouteTableIDs", pulumi.ToStringArray(pulumi.Map(privateRouteTables, func(rt *ec2.RouteTable) pulumi.IDOutput { return rt.ID() })))
@@ -313,25 +312,3 @@ func main() {
 		return nil
 	})
 }
-
-//func extractPublicIP(body []byte) string {
-//	// You need to parse the JSON response to extract the public IP address.
-//	// The structure of the response from httpbin.org is like this:
-//	// {"origin": "xxx.xxx.xxx.xxx"}
-//	// You can use a JSON parser or a simple string manipulation to extract the IP.
-//
-//	// For this example, we'll use a simple string manipulation to extract the IP.
-//	response := string(body)
-//	start := "\"origin\": \""
-//	end := "\"}"
-//	startIndex := strings.Index(response, start)
-//	if startIndex == -1 {
-//		return ""
-//	}
-//	startIndex += len(start)
-//	endIndex := strings.Index(response[startIndex:], end)
-//	if endIndex == -1 {
-//		return ""
-//	}
-//	return response[startIndex : startIndex+endIndex]
-//}

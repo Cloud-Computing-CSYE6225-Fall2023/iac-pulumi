@@ -8,8 +8,11 @@
 *.so
 *.dylib
 .env
+go.sum
 Pulumi.demo.yaml
 Pulumi.dev.yaml
+*.pem
+*.pub
 # Test binary, built with `go test -c`
 *.test
 
