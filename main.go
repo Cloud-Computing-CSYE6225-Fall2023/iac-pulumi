@@ -289,10 +289,13 @@ func main() {
 			Ami:                      pulumi.String(configData.AmiID),
 			SubnetId:                 publicSubnets[0],
 			VpcSecurityGroupIds:      pulumi.StringArray{securityGroup.ID()},
-			RootBlockDevice: &ec2.InstanceRootBlockDeviceArgs{
-				VolumeSize:          pulumi.Int(configData.EC2InstanceMetadata.VolumeSize),           // Set root volume size to 25 GB
-				VolumeType:          pulumi.String(configData.EC2InstanceMetadata.VolumeType),        // Use General Purpose SSD (GP2)
-				DeleteOnTermination: pulumi.Bool(configData.EC2InstanceMetadata.DeleteOnTermination), // Root volume is deleted when instance is terminated
+			EbsBlockDevices: ec2.InstanceEbsBlockDeviceArray{
+				&ec2.InstanceEbsBlockDeviceArgs{
+					DeviceName:          pulumi.String("/dev/xvda"),
+					VolumeType:          pulumi.String(configData.EC2InstanceMetadata.VolumeType),        // Use General Purpose SSD (GP2)
+					VolumeSize:          pulumi.Int(configData.EC2InstanceMetadata.VolumeSize),           // Set root volume size to 25 GB
+					DeleteOnTermination: pulumi.Bool(configData.EC2InstanceMetadata.DeleteOnTermination), // Root volume is deleted when instance is terminated
+				},
 			},
 			DisableApiTermination: pulumi.Bool(configData.EC2InstanceMetadata.DisableApiTermination), // Protect against accidental termination is set to "No"
 			Tags: pulumi.StringMap{
