@@ -1,9 +1,13 @@
 package main
 
 import (
+	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"math/big"
 	"net"
+	"net/http"
 )
 
 /*
@@ -60,6 +64,10 @@ func nextSubnetIP(ip net.IP, mask []byte) net.IP {
 }
 */
 
+type IP struct {
+	Origin string `json:"origin"`
+}
+
 func CalculateCIDRSubnets(parentCIDR string, numSubnets int, bitsToMask int) ([]string, error) {
 	// Parse the parent CIDR into an IPNet struct
 	_, parentIPNet, err := net.ParseCIDR(parentCIDR)
@@ -100,4 +108,34 @@ func nextSubnetIP(ip net.IP, mask net.IPMask, subnetSize *big.Int) net.IP {
 	copy(nextIP[ipLen-len(nextIPBytes):], nextIPBytes)
 
 	return nextIP
+}
+
+func getPublicIPV4(url string) (string, error) {
+	resp, err := http.Get(url)
+	if err != nil {
+		return "", err
+	}
+
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return "", errors.New("couldn't fetch public IP address")
+	}
+
+	// Read the response body
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", err
+	}
+
+	var myIp IP
+	if err = json.Unmarshal(body, &myIp); err != nil {
+		return "", err
+	}
+
+	if myIp.Origin == "" {
+		return "", errors.New("ip address not found")
+	}
+
+	return myIp.Origin, nil
 }
