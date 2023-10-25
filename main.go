@@ -3,21 +3,50 @@ package main
 import (
 	"errors"
 	"fmt"
-	"os"
-
 	"github.com/pulumi/pulumi-aws/sdk/v6/go/aws"
 	"github.com/pulumi/pulumi-aws/sdk/v6/go/aws/ec2"
+	"github.com/pulumi/pulumi-aws/sdk/v6/go/aws/rds"
 	"github.com/pulumi/pulumi/sdk/v3/go/pulumi"
 	"github.com/pulumi/pulumi/sdk/v3/go/pulumi/config"
+	"os"
+	"strings"
 )
 
 type EC2Instance struct {
-	InstanceName          string `json:"instance_name,omitempty"`
-	InstanceType          string `json:"instance_type,omitempty"`
-	VolumeSize            int    `json:"volume_size,omitempty"`
-	VolumeType            string `json:"volume_type,omitempty"`
-	DeleteOnTermination   bool   `json:"delete_on_termination,omitempty"`
-	DisableApiTermination bool   `json:"disable_api_termination,omitempty"`
+	InstanceName             string `json:"instance_name,omitempty"`
+	InstanceType             string `json:"instance_type,omitempty"`
+	VolumeSize               int    `json:"volume_size,omitempty"`
+	VolumeType               string `json:"volume_type,omitempty"`
+	DeleteOnTermination      bool   `json:"delete_on_termination,omitempty"`
+	DisableApiTermination    bool   `json:"disable_api_termination,omitempty"`
+	AssociatePublicIpAddress bool   `json:"associate_public_ip,omitempty"`
+	DeviceType               string `json:"device_type,omitempty"`
+	AmiID                    string `json:"ami_id,omitempty"`
+	SSHKeyName               string `json:"ssh_key_name,omitempty"`
+	UserDataFilePath         string `json:"users_data_file_path,omitempty"`
+	MigrationsFilePath       string `json:"migrations_file_path,omitempty"`
+	PublicKeyFilePath        string `json:"public_key_file_path,omitempty"`
+}
+
+type RDSInstance struct {
+	SubnetGrp          string `json:"private_subnet_group,omitempty"`
+	SecurityGroupName  string `json:"security_group_name,omitempty"`
+	AllowsPort         int    `json:"allows_port,omitempty"`
+	Protocol           string `json:"protocol,omitempty"`
+	InstanceName       string `json:"instance_name,omitempty"`
+	Engine             string `json:"engine,omitempty"`
+	EngineVersion      string `json:"engine_version,omitempty"`
+	InstanceClass      string `json:"instance_class,omitempty"`
+	AllowedStorage     int    `json:"allowed_storage,omitempty"`
+	Identifier         string `json:"identifier,omitempty"`
+	Username           string `json:"username,omitempty"`
+	Password           string `json:"password,omitempty"`
+	DbName             string `json:"db_name,omitempty"`
+	DbDriver           string `json:"db_driver,omitempty"`
+	PubliclyAccessible bool   `json:"publicly_accessible,omitempty"`
+	MultiAz            bool   `json:"multi_az,omitempty"`
+	SkipFinalSnapShot  bool   `json:"skip_final_snapshot,omitempty"`
+	StorageEncrypted   bool   `json:"storage_encrypted,omitempty"`
 }
 
 type Data struct {
@@ -44,9 +73,7 @@ type Data struct {
 	InboundPorts                              map[string]int    `json:"all_inbound_ports,omitempty"`
 	FetchPublicIPURL                          string            `json:"url_to_fetch_public_ip,omitempty"`
 	EC2InstanceMetadata                       EC2Instance       `json:"ec2_instance_metadata,omitempty"`
-	AmiID                                     string            `json:"ami_id,omitempty"`
-	SSHKeyName                                string            `json:"ssh_key_name,omitempty"`
-	PublicKeyFilePath                         string            `json:"public_key_file_path,omitempty"`
+	RDSInstanceMetadata                       RDSInstance       `json:"rds_instance_metadata,omitempty"`
 	PublicRouteTableSubnetsAssociationPrefix  string            `json:"public_route_table_subnets_association_prefix,omitempty"`
 	PrivateRouteTableSubnetsAssociationPrefix string            `json:"private_route_table_subnets_association_prefix,omitempty"`
 }
@@ -226,7 +253,7 @@ func main() {
 		systemPublicIP = systemPublicIP + "/32"
 
 		// Create a new security group
-		securityGroup, err := ec2.NewSecurityGroup(ctx, configData.SecurityGroup, &ec2.SecurityGroupArgs{
+		appSecurityGroup, err := ec2.NewSecurityGroup(ctx, configData.SecurityGroup, &ec2.SecurityGroupArgs{
 			VpcId: awsVpc.ID(),
 			Tags: pulumi.StringMap{
 				"Name": pulumi.String(configData.SecurityGroup),
@@ -266,50 +293,171 @@ func main() {
 			return err
 		}
 
-		// Read the public key content from the file.
-		publicKeyContent, err := os.ReadFile(configData.PublicKeyFilePath)
-		if err != nil {
-			return err
-		}
-
-		// Create an EC2 key pair.
-		_, err = ec2.NewKeyPair(ctx, configData.SSHKeyName, &ec2.KeyPairArgs{
-			KeyName:   pulumi.String(configData.SSHKeyName),
-			PublicKey: pulumi.String(publicKeyContent),
-		})
-		if err != nil {
-			return err
-		}
-
-		// Create an EC2 instance
-		_, err = ec2.NewInstance(ctx, configData.EC2InstanceMetadata.InstanceName, &ec2.InstanceArgs{
-			InstanceType:             pulumi.String(configData.EC2InstanceMetadata.InstanceType),
-			AssociatePublicIpAddress: pulumi.Bool(true),
-			KeyName:                  pulumi.String(configData.SSHKeyName),
-			Ami:                      pulumi.String(configData.AmiID),
-			SubnetId:                 publicSubnets[0],
-			VpcSecurityGroupIds:      pulumi.StringArray{securityGroup.ID()},
-			EbsBlockDevices: ec2.InstanceEbsBlockDeviceArray{
-				&ec2.InstanceEbsBlockDeviceArgs{
-					DeviceName:          pulumi.String("/dev/xvda"),
-					VolumeType:          pulumi.String(configData.EC2InstanceMetadata.VolumeType),        // Use General Purpose SSD (GP2)
-					VolumeSize:          pulumi.Int(configData.EC2InstanceMetadata.VolumeSize),           // Set root volume size to 25 GB
-					DeleteOnTermination: pulumi.Bool(configData.EC2InstanceMetadata.DeleteOnTermination), // Root volume is deleted when instance is terminated
+		// Create a custom parameter group to configure custom RDS Instance
+		rdsParameterGroup, err := rds.NewParameterGroup(ctx, "webapp-parameter-group", &rds.ParameterGroupArgs{
+			Description: pulumi.String("Custom parameter group for webapp rds instance"),
+			Family:      pulumi.String("postgres15"),
+			Name:        pulumi.String("webapp-rds-parameter-group"),
+			Parameters: rds.ParameterGroupParameterArray{
+				&rds.ParameterGroupParameterArgs{
+					Name:  pulumi.String("rds.force_ssl"),
+					Value: pulumi.String("0"),
 				},
 			},
-			DisableApiTermination: pulumi.Bool(configData.EC2InstanceMetadata.DisableApiTermination), // Protect against accidental termination is set to "No"
+		})
+		if err != nil {
+			return err
+		}
+
+		// Create a custom security group for the RDS instance.
+		databaseSecurityGroup, err := ec2.NewSecurityGroup(ctx, configData.RDSInstanceMetadata.SecurityGroupName, &ec2.SecurityGroupArgs{
+			VpcId:       awsVpc.ID(),
+			Description: pulumi.String("Custom RDS Security Group"),
 			Tags: pulumi.StringMap{
-				"Name": pulumi.String(configData.EC2InstanceMetadata.InstanceName),
+				"Name": pulumi.String("database-security-group"),
+			},
+			Ingress: ec2.SecurityGroupIngressArray{
+				&ec2.SecurityGroupIngressArgs{
+					Description: pulumi.String("Allow traffic from resources that use appSecurityGroup through 5432 port"),
+					FromPort:    pulumi.Int(configData.RDSInstanceMetadata.AllowsPort),
+					ToPort:      pulumi.Int(configData.RDSInstanceMetadata.AllowsPort),
+					Protocol:    pulumi.String(configData.RDSInstanceMetadata.Protocol),
+					SecurityGroups: pulumi.StringArray{
+						appSecurityGroup.ID(),
+					},
+				},
 			},
 		})
 		if err != nil {
 			return err
 		}
+
+		_, err = ec2.NewSecurityGroupRule(ctx, "AllowOutboundToDB", &ec2.SecurityGroupRuleArgs{
+			Type:                  pulumi.String("egress"),
+			FromPort:              pulumi.Int(configData.RDSInstanceMetadata.AllowsPort),
+			ToPort:                pulumi.Int(configData.RDSInstanceMetadata.AllowsPort),
+			Protocol:              pulumi.String(configData.RDSInstanceMetadata.Protocol),
+			SourceSecurityGroupId: databaseSecurityGroup.ID(),
+			SecurityGroupId:       appSecurityGroup.ID(),
+		})
+		if err != nil {
+			return err
+		}
+
+		// create a Subnet Group for all private subnets under a VPC.
+		privateSubnetsStrs := make(pulumi.StringArray, len(privateSubnets))
+		publicSubnetsStrs := make(pulumi.StringArray, len(publicSubnets))
+		for _, subnet := range privateSubnets {
+			privateSubnetsStrs = append(privateSubnetsStrs, subnet.ToIDOutput())
+		}
+
+		for _, subnet := range publicSubnets {
+			publicSubnetsStrs = append(publicSubnetsStrs, subnet.ToIDOutput())
+		}
+
+		privateRDSSubnetGrp, err := rds.NewSubnetGroup(ctx, configData.RDSInstanceMetadata.SubnetGrp, &rds.SubnetGroupArgs{
+			SubnetIds: privateSubnetsStrs,
+			Tags: pulumi.StringMap{
+				"Name": pulumi.String("database-private-subnet-grp"),
+			},
+		})
+		if err != nil {
+			return err
+		}
+
+		// Create the RDS instance with the custom security group and parameter group.
+		rdsInstance, err := rds.NewInstance(ctx, configData.RDSInstanceMetadata.InstanceName, &rds.InstanceArgs{
+			Engine:             pulumi.String(configData.RDSInstanceMetadata.Engine),
+			EngineVersion:      pulumi.String(configData.RDSInstanceMetadata.EngineVersion),
+			InstanceClass:      pulumi.String(configData.RDSInstanceMetadata.InstanceClass),
+			AllocatedStorage:   pulumi.Int(configData.RDSInstanceMetadata.AllowedStorage),
+			ApplyImmediately:   pulumi.Bool(true),
+			Identifier:         pulumi.String(configData.RDSInstanceMetadata.Identifier),
+			Username:           pulumi.String(configData.RDSInstanceMetadata.Username),
+			Password:           pulumi.String(configData.RDSInstanceMetadata.Password),
+			DbName:             pulumi.String(configData.RDSInstanceMetadata.DbName),
+			ParameterGroupName: pulumi.StringPtrInput(rdsParameterGroup.Name),
+			DbSubnetGroupName:  pulumi.StringInput(privateRDSSubnetGrp.Name),
+			PubliclyAccessible: pulumi.Bool(configData.RDSInstanceMetadata.PubliclyAccessible),
+			MultiAz:            pulumi.Bool(configData.RDSInstanceMetadata.MultiAz),
+			SkipFinalSnapshot:  pulumi.Bool(configData.RDSInstanceMetadata.SkipFinalSnapShot),
+			StorageEncrypted:   pulumi.Bool(configData.RDSInstanceMetadata.StorageEncrypted),
+			VpcSecurityGroupIds: pulumi.StringArray{
+				databaseSecurityGroup.ID(),
+			},
+		})
+		if err != nil {
+			return err
+		}
+
+		rdsInstance.Endpoint.ApplyT(func(rdsEndpoint string) error {
+			rdsEndpoint = strings.Split(rdsEndpoint, ":")[0]
+
+			// Read the public key content from the file.
+			publicKeyContent, err := os.ReadFile(configData.EC2InstanceMetadata.PublicKeyFilePath)
+			if err != nil {
+				return err
+			}
+
+			// Create an EC2 key pair.
+			_, err = ec2.NewKeyPair(ctx, configData.EC2InstanceMetadata.SSHKeyName, &ec2.KeyPairArgs{
+				KeyName:   pulumi.String(configData.EC2InstanceMetadata.SSHKeyName),
+				PublicKey: pulumi.String(publicKeyContent),
+			})
+			if err != nil {
+				return err
+			}
+
+			// Create an EC2 instance
+			userData := fmt.Sprintf(`#!/bin/bash
+ENV_FILE="/opt/webapp.dev.env"
+sudo echo "PORT=%v" >> ${ENV_FILE}
+sudo echo "DB_USER=%v" >> ${ENV_FILE}
+sudo echo "DB_PASS=%v" >> ${ENV_FILE}
+sudo echo "DB_HOST='%v'" >> ${ENV_FILE}
+sudo echo "DB_PORT=%v" >> ${ENV_FILE}
+sudo echo "DB_NAME=%v" >> ${ENV_FILE}
+sudo echo "DRIVER_NAME=%v" >> ${ENV_FILE}
+sudo echo "USER_DATA_FILE_PATH='%v'" >> ${ENV_FILE}
+sudo echo "MIGRATION_FILE_PATH='%v'" >> ${ENV_FILE}
+`, configData.InboundPorts["customPort"], configData.RDSInstanceMetadata.Username,
+				configData.RDSInstanceMetadata.Password, rdsEndpoint, configData.RDSInstanceMetadata.AllowsPort,
+				configData.RDSInstanceMetadata.DbName, configData.RDSInstanceMetadata.DbDriver,
+				configData.EC2InstanceMetadata.UserDataFilePath, configData.EC2InstanceMetadata.MigrationsFilePath)
+
+			_, err = ec2.NewInstance(ctx, configData.EC2InstanceMetadata.InstanceName, &ec2.InstanceArgs{
+				InstanceType:             pulumi.String(configData.EC2InstanceMetadata.InstanceType),
+				AssociatePublicIpAddress: pulumi.Bool(configData.EC2InstanceMetadata.AssociatePublicIpAddress),
+				KeyName:                  pulumi.String(configData.EC2InstanceMetadata.SSHKeyName),
+				Ami:                      pulumi.String(configData.EC2InstanceMetadata.AmiID),
+				SubnetId:                 publicSubnets[0],
+				UserData:                 pulumi.String(userData),
+				VpcSecurityGroupIds:      pulumi.StringArray{appSecurityGroup.ID()},
+				EbsBlockDevices: ec2.InstanceEbsBlockDeviceArray{
+					&ec2.InstanceEbsBlockDeviceArgs{
+						DeviceName:          pulumi.String(configData.EC2InstanceMetadata.DeviceType),
+						VolumeType:          pulumi.String(configData.EC2InstanceMetadata.VolumeType),        // Use General Purpose SSD (GP2)
+						VolumeSize:          pulumi.Int(configData.EC2InstanceMetadata.VolumeSize),           // Set root volume size to 25 GB
+						DeleteOnTermination: pulumi.Bool(configData.EC2InstanceMetadata.DeleteOnTermination), // Root volume is deleted when instance is terminated
+					},
+				},
+				DisableApiTermination: pulumi.Bool(configData.EC2InstanceMetadata.DisableApiTermination), // Protect against accidental termination is set to "No"
+				Tags: pulumi.StringMap{
+					"Name": pulumi.String(configData.EC2InstanceMetadata.InstanceName),
+				},
+			})
+			if err != nil {
+				return err
+			}
+
+			return nil
+		})
 
 		// Export the subnet and route table IDs for later use
 		//ctx.Export("securityGroupId", securityGroup.ID())
-		//ctx.Export("publicSubnetIDs", pulumi.ToStringArray(publicSubnets))
-		//ctx.Export("privateSubnetIDs", pulumi.ToStringArray(privateSubnets))
+		ctx.Export("publicSubnetIDs", publicSubnetsStrs)
+		ctx.Export("privateSubnetIDs", privateSubnetsStrs)
+		//ctx.Export("rdsEndpoint", rdsInstance.Endpoint.ToStringOutput())
 		//ctx.Export("privateRouteTableIDs", pulumi.ToStringArray(pulumi.Map(privateRouteTables, func(rt *ec2.RouteTable) pulumi.IDOutput { return rt.ID() })))
 
 		return nil
