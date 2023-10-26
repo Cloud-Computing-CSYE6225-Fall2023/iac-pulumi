@@ -420,6 +420,8 @@ sudo echo "DB_NAME=%v" >> ${ENV_FILE}
 sudo echo "DRIVER_NAME=%v" >> ${ENV_FILE}
 sudo echo "USER_DATA_FILE_PATH='%v'" >> ${ENV_FILE}
 sudo echo "MIGRATION_FILE_PATH='%v'" >> ${ENV_FILE}
+chown ec2-user:ec2-user ${ENV_FILE}
+chmod 644 ${ENV_FILE}
 `, configData.InboundPorts["customPort"], configData.RDSInstanceMetadata.Username,
 				configData.RDSInstanceMetadata.Password, rdsEndpoint, configData.RDSInstanceMetadata.AllowsPort,
 				configData.RDSInstanceMetadata.DbName, configData.RDSInstanceMetadata.DbDriver,
