@@ -1,15 +1,19 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/pulumi/pulumi-aws/sdk/v6/go/aws"
-	"github.com/pulumi/pulumi-aws/sdk/v6/go/aws/ec2"
-	"github.com/pulumi/pulumi-aws/sdk/v6/go/aws/rds"
-	"github.com/pulumi/pulumi/sdk/v3/go/pulumi"
-	"github.com/pulumi/pulumi/sdk/v3/go/pulumi/config"
 	"os"
 	"strings"
+
+	"github.com/pulumi/pulumi-aws/sdk/v6/go/aws"
+	"github.com/pulumi/pulumi-aws/sdk/v6/go/aws/ec2"
+	"github.com/pulumi/pulumi-aws/sdk/v6/go/aws/iam"
+	"github.com/pulumi/pulumi-aws/sdk/v6/go/aws/rds"
+	"github.com/pulumi/pulumi-aws/sdk/v6/go/aws/route53"
+	"github.com/pulumi/pulumi/sdk/v3/go/pulumi"
+	"github.com/pulumi/pulumi/sdk/v3/go/pulumi/config"
 )
 
 type EC2Instance struct {
@@ -23,9 +27,26 @@ type EC2Instance struct {
 	DeviceType               string `json:"device_type,omitempty"`
 	AmiID                    string `json:"ami_id,omitempty"`
 	SSHKeyName               string `json:"ssh_key_name,omitempty"`
+	LogFilePath              string `json:"log_file_path,omitempty"`
+	MetricServerPort         int    `json:"metric_server_port,omitempty"`
 	UserDataFilePath         string `json:"users_data_file_path,omitempty"`
 	MigrationsFilePath       string `json:"migrations_file_path,omitempty"`
 	PublicKeyFilePath        string `json:"public_key_file_path,omitempty"`
+}
+
+type MailerClient struct {
+	APIKey string `json:"api_key,omitempty"`
+	Name   string `json:"name,omitempty"`
+	Email  string `json:"email,omitempty"`
+	Domain string `json:"domain,omitempty"`
+}
+
+type DNS struct {
+	ARecordName  string `json:"a_record_name,omitempty"`
+	Type         string `json:"type,omitempty"`
+	Ttl          int    `json:"ttl,omitempty"`
+	Domain       string `json:"domain,omitempty"`
+	HostedZoneID string `json:"hosted_zone_id,omitempty"`
 }
 
 type RDSInstance struct {
@@ -73,7 +94,9 @@ type Data struct {
 	InboundPorts                              map[string]int    `json:"all_inbound_ports,omitempty"`
 	FetchPublicIPURL                          string            `json:"url_to_fetch_public_ip,omitempty"`
 	EC2InstanceMetadata                       EC2Instance       `json:"ec2_instance_metadata,omitempty"`
+	Dns                                       DNS               `json:"dns,omitempty"`
 	RDSInstanceMetadata                       RDSInstance       `json:"rds_instance_metadata,omitempty"`
+	MailerClientCreds                         MailerClient      `json:"mailer_client_crds,omitempty"`
 	PublicRouteTableSubnetsAssociationPrefix  string            `json:"public_route_table_subnets_association_prefix,omitempty"`
 	PrivateRouteTableSubnetsAssociationPrefix string            `json:"private_route_table_subnets_association_prefix,omitempty"`
 }
@@ -344,6 +367,18 @@ func main() {
 			return err
 		}
 
+		_, err = ec2.NewSecurityGroupRule(ctx, "AllowOutboundToInternet", &ec2.SecurityGroupRuleArgs{
+			Type:            pulumi.String("egress"),
+			FromPort:        pulumi.Int(443),
+			ToPort:          pulumi.Int(443),
+			Protocol:        pulumi.String(configData.RDSInstanceMetadata.Protocol),
+			CidrBlocks:      pulumi.StringArray{pulumi.String(configData.PublicDestinationCidar)},
+			SecurityGroupId: appSecurityGroup.ID(),
+		})
+		if err != nil {
+			return err
+		}
+
 		// create a Subnet Group for all private subnets under a VPC.
 		privateSubnetsStrs := make(pulumi.StringArray, len(privateSubnets))
 		publicSubnetsStrs := make(pulumi.StringArray, len(publicSubnets))
@@ -408,6 +443,46 @@ func main() {
 				return err
 			}
 
+			// Create IAM role for EC2 instance
+			ec2CloudWatchRoleStr, err := json.Marshal(map[string]interface{}{
+				"Version": "2012-10-17",
+				"Statement": []map[string]interface{}{
+					{
+						"Effect": "Allow",
+						"Action": []string{"sts:AssumeRole"},
+						"Principal": map[string]interface{}{
+							"Service": []string{"ec2.amazonaws.com"},
+						},
+					},
+				},
+			})
+
+			role, err := iam.NewRole(ctx, "ec2CloudWatchRole", &iam.RoleArgs{
+				AssumeRolePolicy: pulumi.String(ec2CloudWatchRoleStr),
+				Tags: pulumi.StringMap{
+					"tag-key": pulumi.String("ec2-cloudwatch-role"),
+				},
+			})
+			if err != nil {
+				return err
+			}
+
+			// Attach CloudWatchAgentServerPolicy to the new role
+			_, err = iam.NewRolePolicyAttachment(ctx, "ec2CloudWatchPolicy", &iam.RolePolicyAttachmentArgs{
+				Role:      role.ID(),
+				PolicyArn: pulumi.String("arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy"), // replace this Arn with the Arn of the policy you wish to attach
+			})
+			if err != nil {
+				return err
+			}
+
+			instanceProfile, err := iam.NewInstanceProfile(ctx, "ec2CloudWatchProfile", &iam.InstanceProfileArgs{
+				Role: role.Name,
+			})
+			if err != nil {
+				return err
+			}
+
 			// Create an EC2 instance
 			userData := fmt.Sprintf(`#!/bin/bash
 ENV_FILE="/opt/webapp.dev.env"
@@ -420,14 +495,25 @@ sudo echo "DB_NAME=%v" >> ${ENV_FILE}
 sudo echo "DRIVER_NAME=%v" >> ${ENV_FILE}
 sudo echo "USER_DATA_FILE_PATH='%v'" >> ${ENV_FILE}
 sudo echo "MIGRATION_FILE_PATH='%v'" >> ${ENV_FILE}
-chown ec2-user:ec2-user ${ENV_FILE}
-chmod 644 ${ENV_FILE}
+sudo echo "LOG_FILE_PATH='%v'" >> ${ENV_FILE}
+sudo echo "METRIC_SERVER_PORT=%d" >> ${ENV_FILE}
+sudo echo "MAILGUN_API_KEY='%v'" >> ${ENV_FILE}
+sudo echo "MAILGUN_DOMAIN='%v'" >> ${ENV_FILE}
+sudo echo "MAILGUN_SENDER_EMAIL='%v'" >> ${ENV_FILE}
+sudo chown ec2-user:ec2-group ${ENV_FILE}
+sudo chmod 644 ${ENV_FILE}
+
+# Restart Cloud watch agent
+"sudo /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl -a fetch-config -m ec2 -c file:/home/ec2-user/webapp/observability-config.json -s",
+"sudo systemctl restart amazon-cloudwatch-agent"
 `, configData.InboundPorts["customPort"], configData.RDSInstanceMetadata.Username,
 				configData.RDSInstanceMetadata.Password, rdsEndpoint, configData.RDSInstanceMetadata.AllowsPort,
 				configData.RDSInstanceMetadata.DbName, configData.RDSInstanceMetadata.DbDriver,
-				configData.EC2InstanceMetadata.UserDataFilePath, configData.EC2InstanceMetadata.MigrationsFilePath)
+				configData.EC2InstanceMetadata.UserDataFilePath, configData.EC2InstanceMetadata.MigrationsFilePath,
+				configData.EC2InstanceMetadata.LogFilePath, configData.EC2InstanceMetadata.MetricServerPort,
+				configData.MailerClientCreds.APIKey, configData.MailerClientCreds.Domain, configData.MailerClientCreds.Email)
 
-			_, err = ec2.NewInstance(ctx, configData.EC2InstanceMetadata.InstanceName, &ec2.InstanceArgs{
+			webappInstance, err := ec2.NewInstance(ctx, configData.EC2InstanceMetadata.InstanceName, &ec2.InstanceArgs{
 				InstanceType:             pulumi.String(configData.EC2InstanceMetadata.InstanceType),
 				AssociatePublicIpAddress: pulumi.Bool(configData.EC2InstanceMetadata.AssociatePublicIpAddress),
 				KeyName:                  pulumi.String(configData.EC2InstanceMetadata.SSHKeyName),
@@ -435,6 +521,7 @@ chmod 644 ${ENV_FILE}
 				SubnetId:                 publicSubnets[0],
 				UserData:                 pulumi.String(userData),
 				VpcSecurityGroupIds:      pulumi.StringArray{appSecurityGroup.ID()},
+				IamInstanceProfile:       instanceProfile.Name,
 				EbsBlockDevices: ec2.InstanceEbsBlockDeviceArray{
 					&ec2.InstanceEbsBlockDeviceArgs{
 						DeviceName:          pulumi.String(configData.EC2InstanceMetadata.DeviceType),
@@ -447,6 +534,18 @@ chmod 644 ${ENV_FILE}
 				Tags: pulumi.StringMap{
 					"Name": pulumi.String(configData.EC2InstanceMetadata.InstanceName),
 				},
+			})
+			if err != nil {
+				return err
+			}
+
+			_, err = route53.NewRecord(ctx, configData.Dns.ARecordName, &route53.RecordArgs{
+				Name:           pulumi.String(configData.Dns.Domain),
+				Type:           pulumi.String(configData.Dns.Type),
+				ZoneId:         pulumi.String(configData.Dns.HostedZoneID),
+				Records:        pulumi.StringArray{webappInstance.PublicIp},
+				Ttl:            pulumi.Int(configData.Dns.Ttl),
+				AllowOverwrite: pulumi.BoolPtr(true),
 			})
 			if err != nil {
 				return err
