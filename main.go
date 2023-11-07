@@ -504,8 +504,8 @@ sudo chown ec2-user:ec2-group ${ENV_FILE}
 sudo chmod 644 ${ENV_FILE}
 
 # Restart Cloud watch agent
-"sudo /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl -a fetch-config -m ec2 -c file:/home/ec2-user/webapp/observability-config.json -s",
-"sudo systemctl restart amazon-cloudwatch-agent"
+sudo /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl -a fetch-config -m ec2 -c file:/home/ec2-user/webapp/observability-config.json -s
+sudo systemctl restart amazon-cloudwatch-agent
 `, configData.InboundPorts["customPort"], configData.RDSInstanceMetadata.Username,
 				configData.RDSInstanceMetadata.Password, rdsEndpoint, configData.RDSInstanceMetadata.AllowsPort,
 				configData.RDSInstanceMetadata.DbName, configData.RDSInstanceMetadata.DbDriver,
