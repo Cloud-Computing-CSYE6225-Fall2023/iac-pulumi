@@ -1,15 +1,20 @@
 package main
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/pulumi/pulumi-aws/sdk/v6/go/aws/cloudwatch"
 	"os"
+	"strconv"
 	"strings"
 
 	"github.com/pulumi/pulumi-aws/sdk/v6/go/aws"
+	"github.com/pulumi/pulumi-aws/sdk/v6/go/aws/autoscaling"
 	"github.com/pulumi/pulumi-aws/sdk/v6/go/aws/ec2"
 	"github.com/pulumi/pulumi-aws/sdk/v6/go/aws/iam"
+	"github.com/pulumi/pulumi-aws/sdk/v6/go/aws/lb"
 	"github.com/pulumi/pulumi-aws/sdk/v6/go/aws/rds"
 	"github.com/pulumi/pulumi-aws/sdk/v6/go/aws/route53"
 	"github.com/pulumi/pulumi/sdk/v3/go/pulumi"
@@ -275,11 +280,11 @@ func main() {
 
 		systemPublicIP = systemPublicIP + "/32"
 
-		// Create a new security group
-		appSecurityGroup, err := ec2.NewSecurityGroup(ctx, configData.SecurityGroup, &ec2.SecurityGroupArgs{
+		// Create a new security group for load balancer
+		loadBalancerSecurityGroup, err := ec2.NewSecurityGroup(ctx, "load-balancer-security-group", &ec2.SecurityGroupArgs{
 			VpcId: awsVpc.ID(),
 			Tags: pulumi.StringMap{
-				"Name": pulumi.String(configData.SecurityGroup),
+				"Name": pulumi.String("load-balancer-security-group"),
 			},
 			Ingress: ec2.SecurityGroupIngressArray{
 				&ec2.SecurityGroupIngressArgs{
@@ -296,19 +301,58 @@ func main() {
 					Protocol:    pulumi.String(configData.SecurityRuleProtocol),
 					CidrBlocks:  pulumi.StringArray{pulumi.String(configData.PublicDestinationCidar)},
 				},
+			},
+			Egress: ec2.SecurityGroupEgressArray{
+				&ec2.SecurityGroupEgressArgs{
+					FromPort:   pulumi.Int(8080),
+					ToPort:     pulumi.Int(8080),
+					Protocol:   pulumi.String(configData.SecurityRuleProtocol),
+					CidrBlocks: pulumi.StringArray{pulumi.String(configData.PublicDestinationCidar)},
+				},
+				//&ec2.SecurityGroupEgressArgs{
+				//	FromPort:   pulumi.Int(0),
+				//	ToPort:     pulumi.Int(0),
+				//	Protocol:   pulumi.String("-1"),
+				//	CidrBlocks: pulumi.StringArray{pulumi.String(configData.PublicDestinationCidar)},
+				//},
+			},
+		})
+		if err != nil {
+			return err
+		}
+
+		// Create a new security group for application running in EC2
+		appSecurityGroup, err := ec2.NewSecurityGroup(ctx, configData.SecurityGroup, &ec2.SecurityGroupArgs{
+			VpcId: awsVpc.ID(),
+			Tags: pulumi.StringMap{
+				"Name": pulumi.String(configData.SecurityGroup),
+			},
+			Ingress: ec2.SecurityGroupIngressArray{
 				&ec2.SecurityGroupIngressArgs{
 					Description: pulumi.String("Allow inbound HTTPS traffic on port 8080 from public all public IP addresses"),
 					FromPort:    pulumi.Int(configData.InboundPorts["customPort"]),
 					ToPort:      pulumi.Int(configData.InboundPorts["customPort"]),
 					Protocol:    pulumi.String(configData.SecurityRuleProtocol),
-					CidrBlocks:  pulumi.StringArray{pulumi.String(configData.PublicDestinationCidar)},
+					SecurityGroups: pulumi.StringArray{
+						loadBalancerSecurityGroup.ID(),
+					},
 				},
 				&ec2.SecurityGroupIngressArgs{
 					Description: pulumi.String("Allow inbound SSH traffic on port 22 from custom IP"),
 					FromPort:    pulumi.Int(configData.InboundPorts["ssh"]),
 					ToPort:      pulumi.Int(configData.InboundPorts["ssh"]),
 					Protocol:    pulumi.String(configData.SecurityRuleProtocol),
-					CidrBlocks:  pulumi.StringArray{pulumi.String(systemPublicIP)},
+					SecurityGroups: pulumi.StringArray{
+						loadBalancerSecurityGroup.ID(),
+					},
+				},
+			},
+			Egress: ec2.SecurityGroupEgressArray{
+				&ec2.SecurityGroupEgressArgs{
+					FromPort:   pulumi.Int(0),
+					ToPort:     pulumi.Int(0),
+					Protocol:   pulumi.String("-1"),
+					CidrBlocks: pulumi.StringArray{pulumi.String(configData.PublicDestinationCidar)},
 				},
 			},
 		})
@@ -513,38 +557,234 @@ sudo systemctl restart amazon-cloudwatch-agent
 				configData.EC2InstanceMetadata.LogFilePath, configData.EC2InstanceMetadata.MetricServerPort,
 				configData.MailerClientCreds.APIKey, configData.MailerClientCreds.Domain, configData.MailerClientCreds.Email)
 
-			webappInstance, err := ec2.NewInstance(ctx, configData.EC2InstanceMetadata.InstanceName, &ec2.InstanceArgs{
-				InstanceType:             pulumi.String(configData.EC2InstanceMetadata.InstanceType),
-				AssociatePublicIpAddress: pulumi.Bool(configData.EC2InstanceMetadata.AssociatePublicIpAddress),
-				KeyName:                  pulumi.String(configData.EC2InstanceMetadata.SSHKeyName),
-				Ami:                      pulumi.String(configData.EC2InstanceMetadata.AmiID),
-				SubnetId:                 publicSubnets[0],
-				UserData:                 pulumi.String(userData),
-				VpcSecurityGroupIds:      pulumi.StringArray{appSecurityGroup.ID()},
-				IamInstanceProfile:       instanceProfile.Name,
-				EbsBlockDevices: ec2.InstanceEbsBlockDeviceArray{
-					&ec2.InstanceEbsBlockDeviceArgs{
-						DeviceName:          pulumi.String(configData.EC2InstanceMetadata.DeviceType),
-						VolumeType:          pulumi.String(configData.EC2InstanceMetadata.VolumeType),        // Use General Purpose SSD (GP2)
-						VolumeSize:          pulumi.Int(configData.EC2InstanceMetadata.VolumeSize),           // Set root volume size to 25 GB
-						DeleteOnTermination: pulumi.Bool(configData.EC2InstanceMetadata.DeleteOnTermination), // Root volume is deleted when instance is terminated
-					},
+			//webappInstance, err := ec2.NewInstance(ctx, configData.EC2InstanceMetadata.InstanceName, &ec2.InstanceArgs{
+			//	InstanceType:             pulumi.String(configData.EC2InstanceMetadata.InstanceType),
+			//	AssociatePublicIpAddress: pulumi.Bool(configData.EC2InstanceMetadata.AssociatePublicIpAddress),
+			//	KeyName:                  pulumi.String(configData.EC2InstanceMetadata.SSHKeyName),
+			//	Ami:                      pulumi.String(configData.EC2InstanceMetadata.AmiID),
+			//	SubnetId:                 publicSubnets[0],
+			//	UserData:                 pulumi.String(userData),
+			//	VpcSecurityGroupIds:      pulumi.StringArray{appSecurityGroup.ID()},
+			//	IamInstanceProfile:       instanceProfile.Name,
+			//	EbsBlockDevices: ec2.InstanceEbsBlockDeviceArray{
+			//		&ec2.InstanceEbsBlockDeviceArgs{
+			//			DeviceName:          pulumi.String(configData.EC2InstanceMetadata.DeviceType),
+			//			VolumeType:          pulumi.String(configData.EC2InstanceMetadata.VolumeType),        // Use General Purpose SSD (GP2)
+			//			VolumeSize:          pulumi.Int(configData.EC2InstanceMetadata.VolumeSize),           // Set root volume size to 25 GB
+			//			DeleteOnTermination: pulumi.Bool(configData.EC2InstanceMetadata.DeleteOnTermination), // Root volume is deleted when instance is terminated
+			//		},
+			//	},
+			//	DisableApiTermination: pulumi.Bool(configData.EC2InstanceMetadata.DisableApiTermination), // Protect against accidental termination is set to "No"
+			//	Tags: pulumi.StringMap{
+			//		"Name": pulumi.String(configData.EC2InstanceMetadata.InstanceName),
+			//	},
+			//})
+			//if err != nil {
+			//	return err
+			//}
+
+			appLoadBalancer, err := lb.NewLoadBalancer(ctx, "test", &lb.LoadBalancerArgs{
+				Name:             pulumi.String("app-load-balancer"),
+				Internal:         pulumi.Bool(false),
+				LoadBalancerType: pulumi.String("application"),
+				SecurityGroups: pulumi.StringArray{
+					loadBalancerSecurityGroup.ID(),
 				},
-				DisableApiTermination: pulumi.Bool(configData.EC2InstanceMetadata.DisableApiTermination), // Protect against accidental termination is set to "No"
+				Subnets: publicSubnetsStrs,
 				Tags: pulumi.StringMap{
-					"Name": pulumi.String(configData.EC2InstanceMetadata.InstanceName),
+					"Name": pulumi.String("foobar-elb"),
 				},
 			})
 			if err != nil {
 				return err
 			}
 
+			appLoadBalancerTargetGroup, err := lb.NewTargetGroup(ctx, "test", &lb.TargetGroupArgs{
+				Name:       pulumi.String("app-loadbalancer-tg"),
+				Port:       pulumi.Int(8080),
+				Protocol:   pulumi.String("HTTP"),
+				TargetType: pulumi.String("instance"),
+				HealthCheck: lb.TargetGroupHealthCheckArgs{
+					Enabled:            pulumi.Bool(true),
+					Path:               pulumi.String("/healthz"),
+					Port:               pulumi.String("traffic-port"),
+					Protocol:           pulumi.String("HTTP"),
+					HealthyThreshold:   pulumi.Int(2),
+					UnhealthyThreshold: pulumi.Int(2),
+					Timeout:            pulumi.Int(3),
+					Interval:           pulumi.Int(30),
+				},
+				VpcId: awsVpc.ID(),
+			})
+			if err != nil {
+				return err
+			}
+
+			_, err = lb.NewListener(ctx, "frontEndListener", &lb.ListenerArgs{
+				LoadBalancerArn: appLoadBalancer.Arn,
+				Port:            pulumi.Int(80),
+				Protocol:        pulumi.String("HTTP"),
+				DefaultActions: lb.ListenerDefaultActionArray{
+					&lb.ListenerDefaultActionArgs{
+						Type:           pulumi.String("forward"),
+						TargetGroupArn: appLoadBalancerTargetGroup.Arn,
+					},
+				},
+			})
+			if err != nil {
+				return err
+			}
+
+			launchTemplate, err := ec2.NewLaunchTemplate(ctx, "example_launch_template", &ec2.LaunchTemplateArgs{
+				Name:                  pulumi.String("asg_launch_config"),
+				InstanceType:          pulumi.String(configData.EC2InstanceMetadata.InstanceType),
+				KeyName:               pulumi.String(configData.EC2InstanceMetadata.SSHKeyName),
+				ImageId:               pulumi.String(configData.EC2InstanceMetadata.AmiID),
+				IamInstanceProfile:    &ec2.LaunchTemplateIamInstanceProfileArgs{Name: instanceProfile.Name},
+				UserData:              pulumi.String(base64.StdEncoding.EncodeToString([]byte(userData))),
+				DisableApiTermination: pulumi.Bool(configData.EC2InstanceMetadata.DisableApiTermination),
+				Tags: pulumi.StringMap{
+					"Name": pulumi.String(configData.EC2InstanceMetadata.InstanceName),
+				},
+				NetworkInterfaces: ec2.LaunchTemplateNetworkInterfaceArray{
+					&ec2.LaunchTemplateNetworkInterfaceArgs{
+						AssociatePublicIpAddress: pulumi.String("true"),
+						SecurityGroups: pulumi.StringArray{
+							appSecurityGroup.ID(),
+						},
+					},
+				},
+				BlockDeviceMappings: ec2.LaunchTemplateBlockDeviceMappingArray{
+					&ec2.LaunchTemplateBlockDeviceMappingArgs{
+						DeviceName: pulumi.String(configData.EC2InstanceMetadata.DeviceType),
+						Ebs: &ec2.LaunchTemplateBlockDeviceMappingEbsArgs{
+							VolumeType:          pulumi.String(configData.EC2InstanceMetadata.VolumeType), // Use General Purpose SSD (GP2)
+							VolumeSize:          pulumi.Int(configData.EC2InstanceMetadata.VolumeSize),    // Set root volume size to 25 GB
+							DeleteOnTermination: pulumi.String("true"),                                    // Root volume is deleted when instance is terminated
+						},
+					},
+				},
+			})
+			if err != nil {
+				return err
+			}
+
+			launchTemplateVersion := launchTemplate.LatestVersion.ApplyT(func(num int) string {
+				return strconv.Itoa(num)
+			}).(pulumi.StringOutput)
+
+			autoscalingGroup, err := autoscaling.NewGroup(ctx, "example_auto_scaling_group", &autoscaling.GroupArgs{
+				VpcZoneIdentifiers: publicSubnetsStrs,
+				DefaultCooldown:    pulumi.IntPtr(60),
+				DesiredCapacity:    pulumi.IntPtr(1),
+				MaxSize:            pulumi.Int(3),
+				MinSize:            pulumi.Int(1),
+				//HealthCheckType:        pulumi.String("EC2"),
+				HealthCheckGracePeriod: pulumi.Int(300),
+				Tags: autoscaling.GroupTagArray{
+					&autoscaling.GroupTagArgs{
+						Key:               pulumi.String("AutoScalingGroup"),
+						Value:             pulumi.String("TagProperty"),
+						PropagateAtLaunch: pulumi.Bool(true),
+					},
+				},
+				TargetGroupArns: pulumi.StringArray{
+					appLoadBalancerTargetGroup.Arn,
+				},
+				LaunchTemplate: &autoscaling.GroupLaunchTemplateArgs{
+					Id:      launchTemplate.ID(),
+					Version: launchTemplateVersion,
+				},
+			})
+			if err != nil {
+				return err
+			}
+
+			scaleUpPolicy, err := autoscaling.NewPolicy(ctx, "scale_up", &autoscaling.PolicyArgs{
+				AdjustmentType:       pulumi.String("ChangeInCapacity"),
+				ScalingAdjustment:    pulumi.Int(1),
+				Cooldown:             pulumi.Int(60),
+				AutoscalingGroupName: autoscalingGroup.Name,
+				PolicyType:           pulumi.String("SimpleScaling"),
+				//EstimatedInstanceWarmup: pulumi.Int(20),
+				//StepAdjustments: autoscaling.PolicyStepAdjustmentArray{
+				//	&autoscaling.PolicyStepAdjustmentArgs{
+				//		MetricIntervalUpperBound: pulumi.String("5"),
+				//		ScalingAdjustment:        pulumi.Int(1),
+				//	},
+				//},
+			})
+			if err != nil {
+				return err
+			}
+
+			scaleDownPolicy, err := autoscaling.NewPolicy(ctx, "scale_down", &autoscaling.PolicyArgs{
+				AdjustmentType:       pulumi.String("ChangeInCapacity"),
+				ScalingAdjustment:    pulumi.Int(-1),
+				Cooldown:             pulumi.Int(60),
+				AutoscalingGroupName: autoscalingGroup.Name,
+				PolicyType:           pulumi.String("SimpleScaling"),
+				//EstimatedInstanceWarmup: pulumi.Int(20),
+				//StepAdjustments: autoscaling.PolicyStepAdjustmentArray{
+				//	&autoscaling.PolicyStepAdjustmentArgs{
+				//		MetricIntervalUpperBound: pulumi.String("3"),
+				//		ScalingAdjustment:        pulumi.Int(-1),
+				//	},
+				//},
+			})
+			if err != nil {
+				return err
+			}
+
+			_, err = cloudwatch.NewMetricAlarm(ctx, "cpu_utilization_high_alarm", &cloudwatch.MetricAlarmArgs{
+				Name:               pulumi.String("cpu-high"),
+				ComparisonOperator: pulumi.String("GreaterThanOrEqualToThreshold"),
+				EvaluationPeriods:  pulumi.Int(1),
+				MetricName:         pulumi.String("CPUUtilization"),
+				Namespace:          pulumi.String("AWS/EC2"),
+				Period:             pulumi.Int(60),
+				Statistic:          pulumi.String("Average"),
+				Threshold:          pulumi.Float64(5),
+				Dimensions: pulumi.StringMap{
+					"AutoScalingGroupName": autoscalingGroup.Name,
+				},
+				AlarmDescription: pulumi.String("Alarm when CPU exceeds 3% threshold"),
+				AlarmActions: pulumi.Array{
+					scaleUpPolicy.Arn,
+				},
+			})
+
+			_, err = cloudwatch.NewMetricAlarm(ctx, "cpu_utilization_low_alarm", &cloudwatch.MetricAlarmArgs{
+				Name:               pulumi.String("cpu-low"),
+				ComparisonOperator: pulumi.String("LessThanOrEqualToThreshold"),
+				EvaluationPeriods:  pulumi.Int(1),
+				MetricName:         pulumi.String("CPUUtilization"),
+				Namespace:          pulumi.String("AWS/EC2"),
+				Period:             pulumi.Int(60),
+				Statistic:          pulumi.String("Average"),
+				Threshold:          pulumi.Float64(3),
+				Dimensions: pulumi.StringMap{
+					"AutoScalingGroupName": autoscalingGroup.Name,
+				},
+				AlarmDescription: pulumi.String("Alarm when CPU falls below 3% threshold"),
+				AlarmActions: pulumi.Array{
+					scaleDownPolicy.Arn,
+				},
+			})
+
 			_, err = route53.NewRecord(ctx, configData.Dns.ARecordName, &route53.RecordArgs{
-				Name:           pulumi.String(configData.Dns.Domain),
-				Type:           pulumi.String(configData.Dns.Type),
-				ZoneId:         pulumi.String(configData.Dns.HostedZoneID),
-				Records:        pulumi.StringArray{webappInstance.PublicIp},
-				Ttl:            pulumi.Int(configData.Dns.Ttl),
+				Name:   pulumi.String(configData.Dns.Domain),
+				Type:   pulumi.String(configData.Dns.Type),
+				ZoneId: pulumi.String(configData.Dns.HostedZoneID),
+				//Records:        pulumi.StringArray{loadBalancer.DnsName},
+				//Ttl: pulumi.Int(configData.Dns.Ttl),
+				Aliases: route53.RecordAliasArray{
+					&route53.RecordAliasArgs{
+						Name:                 appLoadBalancer.DnsName,
+						ZoneId:               appLoadBalancer.ZoneId,
+						EvaluateTargetHealth: pulumi.Bool(true),
+					},
+				},
 				AllowOverwrite: pulumi.BoolPtr(true),
 			})
 			if err != nil {
@@ -555,9 +795,10 @@ sudo systemctl restart amazon-cloudwatch-agent
 		})
 
 		// Export the subnet and route table IDs for later use
+		//ctx.Export("LoadBalancerIP", loadBalancer.DnsName)
 		//ctx.Export("securityGroupId", securityGroup.ID())
-		ctx.Export("publicSubnetIDs", publicSubnetsStrs)
-		ctx.Export("privateSubnetIDs", privateSubnetsStrs)
+		//ctx.Export("publicSubnetIDs", publicSubnetsStrs)
+		//ctx.Export("privateSubnetIDs", privateSubnetsStrs)
 		//ctx.Export("rdsEndpoint", rdsInstance.Endpoint.ToStringOutput())
 		//ctx.Export("privateRouteTableIDs", pulumi.ToStringArray(pulumi.Map(privateRouteTables, func(rt *ec2.RouteTable) pulumi.IDOutput { return rt.ID() })))
 
