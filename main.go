@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/pulumi/pulumi-aws/sdk/v6/go/aws/cloudwatch"
+	"github.com/pulumi/pulumi-aws/sdk/v6/go/aws/sns"
 	"os"
 	"strconv"
 	"strings"
@@ -37,6 +38,13 @@ type EC2Instance struct {
 	UserDataFilePath         string `json:"users_data_file_path,omitempty"`
 	MigrationsFilePath       string `json:"migrations_file_path,omitempty"`
 	PublicKeyFilePath        string `json:"public_key_file_path,omitempty"`
+}
+
+type Resource struct {
+	Region    string `json:"region"`
+	AccountID string `json:"account_id"`
+	SNSTopic  string `json:"sns_topic"`
+	SQSName   string `json:"sqs_name"`
 }
 
 type MailerClient struct {
@@ -100,6 +108,7 @@ type Data struct {
 	FetchPublicIPURL                          string            `json:"url_to_fetch_public_ip,omitempty"`
 	EC2InstanceMetadata                       EC2Instance       `json:"ec2_instance_metadata,omitempty"`
 	Dns                                       DNS               `json:"dns,omitempty"`
+	ResourceParams                            Resource          `json:"resource_params"`
 	RDSInstanceMetadata                       RDSInstance       `json:"rds_instance_metadata,omitempty"`
 	MailerClientCreds                         MailerClient      `json:"mailer_client_crds,omitempty"`
 	PublicRouteTableSubnetsAssociationPrefix  string            `json:"public_route_table_subnets_association_prefix,omitempty"`
@@ -342,9 +351,10 @@ func main() {
 					FromPort:    pulumi.Int(configData.InboundPorts["ssh"]),
 					ToPort:      pulumi.Int(configData.InboundPorts["ssh"]),
 					Protocol:    pulumi.String(configData.SecurityRuleProtocol),
-					SecurityGroups: pulumi.StringArray{
-						loadBalancerSecurityGroup.ID(),
-					},
+					//SecurityGroups: pulumi.StringArray{
+					//	loadBalancerSecurityGroup.ID(),
+					//},
+					CidrBlocks: pulumi.StringArray{pulumi.String(configData.PublicDestinationCidar)},
 				},
 			},
 			Egress: ec2.SecurityGroupEgressArray{
@@ -514,11 +524,189 @@ func main() {
 			// Attach CloudWatchAgentServerPolicy to the new role
 			_, err = iam.NewRolePolicyAttachment(ctx, "ec2CloudWatchPolicy", &iam.RolePolicyAttachmentArgs{
 				Role:      role.ID(),
-				PolicyArn: pulumi.String("arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy"), // replace this Arn with the Arn of the policy you wish to attach
+				PolicyArn: pulumi.String("arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy"),
 			})
 			if err != nil {
 				return err
 			}
+
+			snsAccessPolicy, err := json.Marshal(map[string]interface{}{
+				"Version": "2008-10-17",
+				"Id":      "__default_policy_ID",
+				"Statement": []map[string]interface{}{
+					{
+						"Sid":    "__default_statement_ID",
+						"Effect": "Allow",
+						"Principal": map[string]string{
+							"AWS": "*",
+						},
+						"Action": []string{
+							"SNS:Publish",
+							"SNS:RemovePermission",
+							"SNS:SetTopicAttributes",
+							"SNS:DeleteTopic",
+							"SNS:ListSubscriptionsByTopic",
+							"SNS:GetTopicAttributes",
+							"SNS:AddPermission",
+							"SNS:Subscribe",
+						},
+						"Resource": fmt.Sprintf("arn:aws:sns:%v:%v:%v", configData.ResourceParams.Region, configData.ResourceParams.AccountID, configData.ResourceParams.SNSTopic),
+						"Condition": map[string]interface{}{
+							"StringEquals": map[string]string{
+								"AWS:SourceOwner": configData.ResourceParams.AccountID,
+							},
+						},
+					},
+					//{
+					//	"Sid":    "__console_pub_0",
+					//	"Effect": "Allow",
+					//	"Principal": map[string]interface{}{
+					//		"AWS": configData.ResourceParams.AccountID,
+					//	},
+					//	"Action":   "SNS:Publish",
+					//	"Resource": fmt.Sprintf("arn:aws:sns:%v:%v:%v", configData.ResourceParams.Region, configData.ResourceParams.AccountID, configData.ResourceParams.SNSTopic),
+					//},
+					//{
+					//	"Sid":    "__console_sub_0",
+					//	"Effect": "Allow",
+					//	"Principal": map[string]interface{}{
+					//		"AWS": configData.ResourceParams.AccountID,
+					//	},
+					//	"Action": []string{
+					//		"SNS:Subscribe",
+					//	},
+					//	"Resource": fmt.Sprintf("arn:aws:sns:%v:%v:%v", configData.ResourceParams.Region, configData.ResourceParams.AccountID, configData.ResourceParams.SNSTopic),
+					//},
+				},
+			})
+			if err != nil {
+				return err
+			}
+
+			_, err = sns.NewTopic(ctx, "testSNSTopic", &sns.TopicArgs{
+				Name:        pulumi.String(configData.ResourceParams.SNSTopic),
+				DisplayName: pulumi.String("submissions"),
+				FifoTopic:   pulumi.Bool(false),
+				Policy:      pulumi.String(snsAccessPolicy),
+			})
+			if err != nil {
+				return err
+			}
+
+			snsPolicyStr, err := json.Marshal(map[string]interface{}{
+				"Version": "2012-10-17",
+				"Statement": []map[string]interface{}{
+					{
+						"Sid":    "VisualEditor0",
+						"Effect": "Allow",
+						"Action": []string{
+							"sns:Publish",
+							"sns:Subscribe",
+						},
+						"Resource": fmt.Sprintf("arn:aws:sns:%v:%v:%v", configData.ResourceParams.Region, configData.ResourceParams.AccountID, configData.ResourceParams.SNSTopic),
+					},
+					{
+						"Sid": "VisualEditor1",
+						"Action": []string{
+							"sns:ListTopics",
+							"sns:Unsubscribe",
+							"sns:ListSubscriptions",
+						},
+						"Effect":   "Allow",
+						"Resource": "*",
+					},
+				},
+			})
+			if err != nil {
+				return err
+			}
+
+			customSNSPolicy, err := iam.NewPolicy(ctx, "CustomSNSPolicy2", &iam.PolicyArgs{
+				Path:        pulumi.String("/"),
+				Description: pulumi.String("Custom SNS policy to publish message from EC2 to SNS Topic"),
+				Policy:      pulumi.String(snsPolicyStr),
+			})
+			if err != nil {
+				return err
+			}
+
+			_, err = iam.NewRolePolicyAttachment(ctx, "ec2SNSPolicy", &iam.RolePolicyAttachmentArgs{
+				Role:      role.ID(),
+				PolicyArn: customSNSPolicy.Arn,
+			})
+			if err != nil {
+				return err
+			}
+
+			//sqsAccessPolicy, err := json.Marshal(map[string]interface{}{
+			//	"Version": "2012-10-17",
+			//	"Id":      "__default_policy_ID",
+			//	"Statement": []map[string]interface{}{
+			//		{
+			//			"Sid":    "__owner_statement",
+			//			"Effect": "Allow",
+			//			"Principal": map[string]string{
+			//				"AWS": "394598842451",
+			//			},
+			//			"Action": []string{
+			//				"SQS:*",
+			//			},
+			//			"Resource": fmt.Sprintf("arn:aws:sqs:%v:%v:%v", configData.ResourceParams.Region, configData.ResourceParams.AccountID, configData.ResourceParams.SQSName),
+			//		},
+			//		{
+			//			"Sid":    "__sender_statement",
+			//			"Effect": "Allow",
+			//			"Principal": map[string]string{
+			//				"AWS": configData.ResourceParams.AccountID,
+			//			},
+			//			"Action": []string{
+			//				"SQS:SendMessage",
+			//			},
+			//			"Resource": fmt.Sprintf("arn:aws:sqs:%v:%v:%v", configData.ResourceParams.Region, configData.ResourceParams.AccountID, configData.ResourceParams.SQSName),
+			//		},
+			//		{
+			//			"Sid":    "__receiver_statement",
+			//			"Effect": "Allow",
+			//			"Principal": map[string]string{
+			//				"AWS": configData.ResourceParams.AccountID,
+			//			},
+			//			"Action": []string{
+			//				"SQS:ChangeMessageVisibility",
+			//				"SQS:DeleteMessage",
+			//				"SQS:ReceiveMessage",
+			//			},
+			//			"Resource": fmt.Sprintf("arn:aws:sqs:%v:%v:%v", configData.ResourceParams.Region, configData.ResourceParams.AccountID, configData.ResourceParams.SQSName),
+			//		},
+			//	},
+			//})
+			//if err != nil {
+			//	return err
+			//}
+
+			//submissionsQueue, err := sqs.NewQueue(ctx, "queue", &sqs.QueueArgs{
+			//	Name:                      pulumi.String(configData.ResourceParams.SQSName),
+			//	ContentBasedDeduplication: pulumi.Bool(true),
+			//	FifoQueue:                 pulumi.Bool(true),
+			//	VisibilityTimeoutSeconds:  pulumi.Int(3),
+			//	MessageRetentionSeconds:   pulumi.Int(345600),
+			//	MaxMessageSize:            pulumi.Int(256000),
+			//	Policy:                    pulumi.String(sqsAccessPolicy),
+			//	DeduplicationScope:        pulumi.String("messageGroup"),
+			//	//Tags:
+			//})
+			//if err != nil {
+			//	return err
+			//}
+
+			//_, err = sns.NewTopicSubscription(ctx, "submissionsSQSTarget", &sns.TopicSubscriptionArgs{
+			//	Topic:              submissionsTopic.Arn,
+			//	Protocol:           pulumi.String("sqs"),
+			//	Endpoint:           submissionsQueue.Arn,
+			//	RawMessageDelivery: pulumi.Bool(true),
+			//})
+			//if err != nil {
+			//	return err
+			//}
 
 			instanceProfile, err := iam.NewInstanceProfile(ctx, "ec2CloudWatchProfile", &iam.InstanceProfileArgs{
 				Role: role.Name,
@@ -544,6 +732,7 @@ sudo echo "METRIC_SERVER_PORT=%d" >> ${ENV_FILE}
 sudo echo "MAILGUN_API_KEY='%v'" >> ${ENV_FILE}
 sudo echo "MAILGUN_DOMAIN='%v'" >> ${ENV_FILE}
 sudo echo "MAILGUN_SENDER_EMAIL='%v'" >> ${ENV_FILE}
+sudo echo "TOPIC_ARN=%v" >> ${ENV_FILE}
 sudo chown ec2-user:ec2-group ${ENV_FILE}
 sudo chmod 644 ${ENV_FILE}
 
@@ -555,7 +744,8 @@ sudo systemctl restart amazon-cloudwatch-agent
 				configData.RDSInstanceMetadata.DbName, configData.RDSInstanceMetadata.DbDriver,
 				configData.EC2InstanceMetadata.UserDataFilePath, configData.EC2InstanceMetadata.MigrationsFilePath,
 				configData.EC2InstanceMetadata.LogFilePath, configData.EC2InstanceMetadata.MetricServerPort,
-				configData.MailerClientCreds.APIKey, configData.MailerClientCreds.Domain, configData.MailerClientCreds.Email)
+				configData.MailerClientCreds.APIKey, configData.MailerClientCreds.Domain, configData.MailerClientCreds.Email,
+				fmt.Sprintf("arn:aws:sns:%v:%v:%v", configData.ResourceParams.Region, configData.ResourceParams.AccountID, configData.ResourceParams.SNSTopic))
 
 			//webappInstance, err := ec2.NewInstance(ctx, configData.EC2InstanceMetadata.InstanceName, &ec2.InstanceArgs{
 			//	InstanceType:             pulumi.String(configData.EC2InstanceMetadata.InstanceType),
