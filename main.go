@@ -297,13 +297,13 @@ func main() {
 				"Name": pulumi.String("load-balancer-security-group"),
 			},
 			Ingress: ec2.SecurityGroupIngressArray{
-				//&ec2.SecurityGroupIngressArgs{
-				//	Description: pulumi.String("Allow inbound HTTP traffic on port 80 from all public IP addresses"),
-				//	FromPort:    pulumi.Int(configData.InboundPorts["http"]),
-				//	ToPort:      pulumi.Int(configData.InboundPorts["http"]),
-				//	Protocol:    pulumi.String(configData.SecurityRuleProtocol),
-				//	CidrBlocks:  pulumi.StringArray{pulumi.String(configData.PublicDestinationCidar)},
-				//},
+				&ec2.SecurityGroupIngressArgs{
+					Description: pulumi.String("Allow inbound HTTP traffic on port 80 from all public IP addresses"),
+					FromPort:    pulumi.Int(configData.InboundPorts["http"]),
+					ToPort:      pulumi.Int(configData.InboundPorts["http"]),
+					Protocol:    pulumi.String(configData.SecurityRuleProtocol),
+					CidrBlocks:  pulumi.StringArray{pulumi.String(configData.PublicDestinationCidar)},
+				},
 				&ec2.SecurityGroupIngressArgs{
 					Description: pulumi.String("Allow inbound HTTPS traffic on port 443 from all public IP addresses"),
 					FromPort:    pulumi.Int(configData.InboundPorts["https"]),
@@ -352,10 +352,10 @@ func main() {
 					FromPort:    pulumi.Int(configData.InboundPorts["ssh"]),
 					ToPort:      pulumi.Int(configData.InboundPorts["ssh"]),
 					Protocol:    pulumi.String(configData.SecurityRuleProtocol),
-					//SecurityGroups: pulumi.StringArray{
-					//	loadBalancerSecurityGroup.ID(),
-					//},
-					CidrBlocks: pulumi.StringArray{pulumi.String(configData.PublicDestinationCidar)},
+					SecurityGroups: pulumi.StringArray{
+						loadBalancerSecurityGroup.ID(),
+					},
+					//CidrBlocks: pulumi.StringArray{pulumi.String(configData.PublicDestinationCidar)},
 				},
 			},
 			Egress: ec2.SecurityGroupEgressArray{
@@ -841,7 +841,7 @@ sudo systemctl restart amazon-cloudwatch-agent
 				},
 				NetworkInterfaces: ec2.LaunchTemplateNetworkInterfaceArray{
 					&ec2.LaunchTemplateNetworkInterfaceArgs{
-						AssociatePublicIpAddress: pulumi.String("false"),
+						AssociatePublicIpAddress: pulumi.String("true"),
 						SecurityGroups: pulumi.StringArray{
 							appSecurityGroup.ID(),
 						},
