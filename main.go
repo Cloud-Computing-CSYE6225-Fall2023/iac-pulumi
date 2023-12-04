@@ -41,10 +41,11 @@ type EC2Instance struct {
 }
 
 type Resource struct {
-	Region    string `json:"region"`
-	AccountID string `json:"account_id"`
-	SNSTopic  string `json:"sns_topic"`
-	SQSName   string `json:"sqs_name"`
+	Region         string `json:"region"`
+	AccountID      string `json:"account_id"`
+	SNSTopic       string `json:"sns_topic"`
+	SQSName        string `json:"sqs_name"`
+	CertificateArn string `json:"certificate_arn"`
 }
 
 type MailerClient struct {
@@ -296,13 +297,13 @@ func main() {
 				"Name": pulumi.String("load-balancer-security-group"),
 			},
 			Ingress: ec2.SecurityGroupIngressArray{
-				&ec2.SecurityGroupIngressArgs{
-					Description: pulumi.String("Allow inbound HTTP traffic on port 80 from all public IP addresses"),
-					FromPort:    pulumi.Int(configData.InboundPorts["http"]),
-					ToPort:      pulumi.Int(configData.InboundPorts["http"]),
-					Protocol:    pulumi.String(configData.SecurityRuleProtocol),
-					CidrBlocks:  pulumi.StringArray{pulumi.String(configData.PublicDestinationCidar)},
-				},
+				//&ec2.SecurityGroupIngressArgs{
+				//	Description: pulumi.String("Allow inbound HTTP traffic on port 80 from all public IP addresses"),
+				//	FromPort:    pulumi.Int(configData.InboundPorts["http"]),
+				//	ToPort:      pulumi.Int(configData.InboundPorts["http"]),
+				//	Protocol:    pulumi.String(configData.SecurityRuleProtocol),
+				//	CidrBlocks:  pulumi.StringArray{pulumi.String(configData.PublicDestinationCidar)},
+				//},
 				&ec2.SecurityGroupIngressArgs{
 					Description: pulumi.String("Allow inbound HTTPS traffic on port 443 from all public IP addresses"),
 					FromPort:    pulumi.Int(configData.InboundPorts["https"]),
@@ -812,8 +813,10 @@ sudo systemctl restart amazon-cloudwatch-agent
 
 			_, err = lb.NewListener(ctx, "frontEndListener", &lb.ListenerArgs{
 				LoadBalancerArn: appLoadBalancer.Arn,
-				Port:            pulumi.Int(80),
-				Protocol:        pulumi.String("HTTP"),
+				Port:            pulumi.Int(443),
+				CertificateArn:  pulumi.String(configData.ResourceParams.CertificateArn),
+				SslPolicy:       pulumi.String("ELBSecurityPolicy-TLS13-1-2-2021-06"),
+				Protocol:        pulumi.String("HTTPS"),
 				DefaultActions: lb.ListenerDefaultActionArray{
 					&lb.ListenerDefaultActionArgs{
 						Type:           pulumi.String("forward"),
@@ -838,7 +841,7 @@ sudo systemctl restart amazon-cloudwatch-agent
 				},
 				NetworkInterfaces: ec2.LaunchTemplateNetworkInterfaceArray{
 					&ec2.LaunchTemplateNetworkInterfaceArgs{
-						AssociatePublicIpAddress: pulumi.String("true"),
+						AssociatePublicIpAddress: pulumi.String("false"),
 						SecurityGroups: pulumi.StringArray{
 							appSecurityGroup.ID(),
 						},
@@ -864,6 +867,7 @@ sudo systemctl restart amazon-cloudwatch-agent
 			}).(pulumi.StringOutput)
 
 			autoscalingGroup, err := autoscaling.NewGroup(ctx, "example_auto_scaling_group", &autoscaling.GroupArgs{
+				Name:               pulumi.String("webapp-auto-scaling-group"),
 				VpcZoneIdentifiers: publicSubnetsStrs,
 				DefaultCooldown:    pulumi.IntPtr(60),
 				DesiredCapacity:    pulumi.IntPtr(1),
