@@ -297,13 +297,13 @@ func main() {
 				"Name": pulumi.String("load-balancer-security-group"),
 			},
 			Ingress: ec2.SecurityGroupIngressArray{
-				&ec2.SecurityGroupIngressArgs{
-					Description: pulumi.String("Allow inbound HTTP traffic on port 80 from all public IP addresses"),
-					FromPort:    pulumi.Int(configData.InboundPorts["http"]),
-					ToPort:      pulumi.Int(configData.InboundPorts["http"]),
-					Protocol:    pulumi.String(configData.SecurityRuleProtocol),
-					CidrBlocks:  pulumi.StringArray{pulumi.String(configData.PublicDestinationCidar)},
-				},
+				//&ec2.SecurityGroupIngressArgs{
+				//	Description: pulumi.String("Allow inbound HTTP traffic on port 80 from all public IP addresses"),
+				//	FromPort:    pulumi.Int(configData.InboundPorts["http"]),
+				//	ToPort:      pulumi.Int(configData.InboundPorts["http"]),
+				//	Protocol:    pulumi.String(configData.SecurityRuleProtocol),
+				//	CidrBlocks:  pulumi.StringArray{pulumi.String(configData.PublicDestinationCidar)},
+				//},
 				&ec2.SecurityGroupIngressArgs{
 					Description: pulumi.String("Allow inbound HTTPS traffic on port 443 from all public IP addresses"),
 					FromPort:    pulumi.Int(configData.InboundPorts["https"]),
@@ -639,76 +639,6 @@ func main() {
 				return err
 			}
 
-			//sqsAccessPolicy, err := json.Marshal(map[string]interface{}{
-			//	"Version": "2012-10-17",
-			//	"Id":      "__default_policy_ID",
-			//	"Statement": []map[string]interface{}{
-			//		{
-			//			"Sid":    "__owner_statement",
-			//			"Effect": "Allow",
-			//			"Principal": map[string]string{
-			//				"AWS": "394598842451",
-			//			},
-			//			"Action": []string{
-			//				"SQS:*",
-			//			},
-			//			"Resource": fmt.Sprintf("arn:aws:sqs:%v:%v:%v", configData.ResourceParams.Region, configData.ResourceParams.AccountID, configData.ResourceParams.SQSName),
-			//		},
-			//		{
-			//			"Sid":    "__sender_statement",
-			//			"Effect": "Allow",
-			//			"Principal": map[string]string{
-			//				"AWS": configData.ResourceParams.AccountID,
-			//			},
-			//			"Action": []string{
-			//				"SQS:SendMessage",
-			//			},
-			//			"Resource": fmt.Sprintf("arn:aws:sqs:%v:%v:%v", configData.ResourceParams.Region, configData.ResourceParams.AccountID, configData.ResourceParams.SQSName),
-			//		},
-			//		{
-			//			"Sid":    "__receiver_statement",
-			//			"Effect": "Allow",
-			//			"Principal": map[string]string{
-			//				"AWS": configData.ResourceParams.AccountID,
-			//			},
-			//			"Action": []string{
-			//				"SQS:ChangeMessageVisibility",
-			//				"SQS:DeleteMessage",
-			//				"SQS:ReceiveMessage",
-			//			},
-			//			"Resource": fmt.Sprintf("arn:aws:sqs:%v:%v:%v", configData.ResourceParams.Region, configData.ResourceParams.AccountID, configData.ResourceParams.SQSName),
-			//		},
-			//	},
-			//})
-			//if err != nil {
-			//	return err
-			//}
-
-			//submissionsQueue, err := sqs.NewQueue(ctx, "queue", &sqs.QueueArgs{
-			//	Name:                      pulumi.String(configData.ResourceParams.SQSName),
-			//	ContentBasedDeduplication: pulumi.Bool(true),
-			//	FifoQueue:                 pulumi.Bool(true),
-			//	VisibilityTimeoutSeconds:  pulumi.Int(3),
-			//	MessageRetentionSeconds:   pulumi.Int(345600),
-			//	MaxMessageSize:            pulumi.Int(256000),
-			//	Policy:                    pulumi.String(sqsAccessPolicy),
-			//	DeduplicationScope:        pulumi.String("messageGroup"),
-			//	//Tags:
-			//})
-			//if err != nil {
-			//	return err
-			//}
-
-			//_, err = sns.NewTopicSubscription(ctx, "submissionsSQSTarget", &sns.TopicSubscriptionArgs{
-			//	Topic:              submissionsTopic.Arn,
-			//	Protocol:           pulumi.String("sqs"),
-			//	Endpoint:           submissionsQueue.Arn,
-			//	RawMessageDelivery: pulumi.Bool(true),
-			//})
-			//if err != nil {
-			//	return err
-			//}
-
 			instanceProfile, err := iam.NewInstanceProfile(ctx, "ec2CloudWatchProfile", &iam.InstanceProfileArgs{
 				Role: role.Name,
 			})
@@ -813,10 +743,12 @@ sudo systemctl restart amazon-cloudwatch-agent
 
 			_, err = lb.NewListener(ctx, "frontEndListener", &lb.ListenerArgs{
 				LoadBalancerArn: appLoadBalancer.Arn,
-				Port:            pulumi.Int(443),
-				CertificateArn:  pulumi.String(configData.ResourceParams.CertificateArn),
-				SslPolicy:       pulumi.String("ELBSecurityPolicy-TLS13-1-2-2021-06"),
-				Protocol:        pulumi.String("HTTPS"),
+				//Port:            pulumi.Int(80),
+				//Protocol:        pulumi.String("HTTP"),
+				Port:           pulumi.Int(443),
+				CertificateArn: pulumi.String(configData.ResourceParams.CertificateArn),
+				SslPolicy:      pulumi.String("ELBSecurityPolicy-TLS13-1-2-2021-06"),
+				Protocol:       pulumi.String("HTTPS"),
 				DefaultActions: lb.ListenerDefaultActionArray{
 					&lb.ListenerDefaultActionArgs{
 						Type:           pulumi.String("forward"),
